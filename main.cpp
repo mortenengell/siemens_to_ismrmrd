@@ -776,13 +776,13 @@ int main(int argc, char *argv[] )
 
     // find the beginning of the desired measurement
     siemens_dat.seekg(ParcFileEntries[measurement_number-1].off_, std::ios::beg);
-
+	std::cout << "pos " << siemens_dat.tellg() << std::endl;
     uint32_t dma_length = 0, num_buffers = 0;
 
     siemens_dat.read((char*)(&dma_length), sizeof(uint32_t));
     siemens_dat.read((char*)(&num_buffers), sizeof(uint32_t));
 
-    //std::cout << "Measurement header DMA length: " << mhead.dma_length << std::endl;
+    //std::cout << "Measurement header DMA length: " << dma_length << std::endl;
 
     MeasurementHeaderBuffer* buffers = new MeasurementHeaderBuffer[num_buffers];
 
@@ -1429,10 +1429,11 @@ int main(int argc, char *argv[] )
      {
          size_t position_in_meas = siemens_dat.tellg();
          sScanHeader scanhead;
-         siemens_dat.read(reinterpret_cast<char*>(&scanhead.ulFlagsAndDMALength), sizeof(uint32_t));
-
+         siemens_dat.read(reinterpret_cast<char*>(&scanhead.ulFlagsAndDMALength), sizeof(int32_t));
+		 std::cout << scanhead.ulFlagsAndDMALength << std::endl;
          if (VBFILE)
          {
+			 std::cout << "this is a VBfile we read in the header" << std::endl;
              siemens_dat.read(reinterpret_cast<char*>(&mdh) + sizeof(uint32_t), sizeof(sMDH) - sizeof(uint32_t));
              scanhead.lMeasUID = mdh.lMeasUID;
              scanhead.ulScanCounter = mdh.ulScanCounter;
@@ -1478,6 +1479,10 @@ int main(int argc, char *argv[] )
          uint32_t dma_length = scanhead.ulFlagsAndDMALength & MDH_DMA_LENGTH_MASK;
          uint32_t mdh_enable_flags = scanhead.ulFlagsAndDMALength & MDH_ENABLE_FLAGS_MASK;
 
+		 //moved up to be ready for syncdata
+		 ismrmrd_dataset = boost::shared_ptr<ISMRMRD::Dataset>(new ISMRMRD::Dataset(ismrmrd_file.c_str(), ismrmrd_group.c_str(), true));
+		 ismrmrd_dataset->writeHeader(xml_config);
+
         //Check if this is synch data, if so, it must be handled differently.
          if (scanhead.aulEvalInfoMask[0] & ( 1 << 5))
          {
@@ -1487,17 +1492,41 @@ int main(int argc, char *argv[] )
              if (VBFILE)
              {
                  len = dma_length-sizeof(sMDH);
+				 std::cout << "danger will robinson" << std::endl;
              }
              else
              {
                  len = dma_length-sizeof(sScanHeader);
+				 std::cout << len <<  " :-: " << scanhead.ulFlagsAndDMALength << std::endl;
              }
 
+			 //replace this with proper datastructure
+			 uint32_t packetsize;
+			 //siemens_dat.read(reinterpret_cast<char*>(&packetsize), 4);
+			 //std::cout <<  "packetsize should be 864: " << packetsize << std::endl;
+			 
+			 
              std::vector<uint8_t> syncdata(len);
+			 std::cout << "size of syncdata : " << len << std::endl;
+			 
              siemens_dat.read(reinterpret_cast<char*>(&syncdata[0]), len);
-
+			 
              sync_data_packets++;
-             continue;
+			 
+			 //make sure the syncdata is sent to an acquistion and appended 
+			 ISMRMRD::Acquisition* ismrmrd_wav = new ISMRMRD::Acquisition;
+			 // Acquisition header values are zero by default
+			 ismrmrd_wav->measurement_uid() = scanhead.lMeasUID;
+			 ismrmrd_wav->scan_counter() = scanhead.ulScanCounter;
+			 ismrmrd_wav->acquisition_time_stamp() = scanhead.ulTimeStamp;
+			 ismrmrd_wav->physiology_time_stamp()[0] = scanhead.ulPMUTimeStamp;
+			 ismrmrd_wav->available_channels() = (uint16_t)max_channels;
+			 // uint64_t channel_mask[16];     //Mask to indicate which channels are active. Support for 1024 channels
+			 ismrmrd_wav->discard_pre() = scanhead.sCutOff.ushPre;
+			 ismrmrd_wav->discard_post() = scanhead.sCutOff.ushPost;
+			 ismrmrd_wav->center_sample() = scanhead.ushKSpaceCentreColumn;
+			 ismrmrd_dataset->appendAcquisition(*ismrmrd_wav);//write to dataset 
+			 continue;
          }
 
          if(first_call)
@@ -1541,8 +1570,7 @@ int main(int argc, char *argv[] )
              }
 
              // Create an ISMRMRD dataset
-             ismrmrd_dataset = boost::shared_ptr<ISMRMRD::Dataset>(new ISMRMRD::Dataset(ismrmrd_file.c_str(), ismrmrd_group.c_str(), true));
-             ismrmrd_dataset->writeHeader(xml_config);
+            
          }
 
          //This check only makes sense in VD line files.
@@ -1605,8 +1633,9 @@ int main(int argc, char *argv[] )
              std::cout << "Last scan reached..." << std::endl;
              break;
          }
-
+		 
          ISMRMRD::Acquisition* ismrmrd_acq = new ISMRMRD::Acquisition;
+		 
          // The number of samples, channels and trajectory dimensions is set below
 
          // Acquisition header values are zero by default
@@ -1773,7 +1802,7 @@ int main(int argc, char *argv[] )
                      &channels[c].data[0], ismrmrd_acq->number_of_samples()*sizeof(complex_float_t));
          }
 
-         ismrmrd_dataset->appendAcquisition(*ismrmrd_acq);
+		 ismrmrd_dataset->appendAcquisition(*ismrmrd_acq);
 
          if ( scanhead.ulScanCounter % 1000 == 0 ) {
              std::cout << "wrote scan : " << scanhead.ulScanCounter << std::endl;
