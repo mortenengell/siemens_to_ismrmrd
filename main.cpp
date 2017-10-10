@@ -48,6 +48,18 @@ using boost::locale::conv::utf_to_utf;
 
 const size_t MYSTERY_BYTES_EXPECTED = 160;
 
+enum MAGIC_NO {
+	PMU_MAGIC_END  = 0x01FF0000,
+	PMU_MAGIC_ECG1 = 0x01010000,
+	PMU_MAGIC_ECG2 = 0x01020000,
+	PMU_MAGIC_ECG3 = 0x01030000,
+	PMU_MAGIC_ECG4 = 0x01040000,
+	PMU_MAGIC_PULS = 0x01050000,
+	PMU_MAGIC_RESP = 0x01060000,
+	PMU_MAGIC_EXT1 = 0x01070000,
+	PMU_MAGIC_EXT2 = 0x01080000
+};
+
 // defined in generated defaults.cpp
 extern void initializeEmbeddedFiles(void);
 extern std::map<std::string, std::string> global_embedded_files;
@@ -1423,7 +1435,9 @@ int main(int argc, char *argv[] )
      unsigned long int sync_data_packets = 0;
      sMDH mdh;//For VB line
      bool first_call = true;
-
+	 //make sure the syncdata is sent to an acquistion and appended 
+	 //should this be made beofre the loop and just appended to maybe without the header being written each time
+	 ISMRMRD::Waveform* ismrmrd_wav = new ISMRMRD::Waveform;
      while (!(last_mask & 1) && //Last scan not encountered
              (((ParcFileEntries[measurement_number-1].off_+ ParcFileEntries[measurement_number-1].len_)-siemens_dat.tellg()) > sizeof(sScanHeader)))  //not reached end of measurement without acqend
      {
@@ -1492,7 +1506,6 @@ int main(int argc, char *argv[] )
              if (VBFILE)
              {
                  len = dma_length-sizeof(sMDH);
-				 std::cout << "danger will robinson" << std::endl;
              }
              else
              {
@@ -1501,20 +1514,19 @@ int main(int argc, char *argv[] )
              }
 
 			 //replace this with proper datastructure
-			 uint32_t packetsize;
+			 
 			 //siemens_dat.read(reinterpret_cast<char*>(&packetsize), 4);
 			 //std::cout <<  "packetsize should be 864: " << packetsize << std::endl;
 			 
 			 
-             std::vector<uint8_t> syncdata(len);
-			 std::cout << "size of syncdata : " << len << std::endl;
+             
 			 
-             siemens_dat.read(reinterpret_cast<char*>(&syncdata[0]), len);
+      
 			 
              sync_data_packets++;
 			 
-			 //make sure the syncdata is sent to an acquistion and appended 
-			 ISMRMRD::Acquisition* ismrmrd_wav = new ISMRMRD::Acquisition;
+			 
+
 			 // Acquisition header values are zero by default
 			 ismrmrd_wav->measurement_uid() = scanhead.lMeasUID;
 			 ismrmrd_wav->scan_counter() = scanhead.ulScanCounter;
@@ -1525,7 +1537,67 @@ int main(int argc, char *argv[] )
 			 ismrmrd_wav->discard_pre() = scanhead.sCutOff.ushPre;
 			 ismrmrd_wav->discard_post() = scanhead.sCutOff.ushPost;
 			 ismrmrd_wav->center_sample() = scanhead.ushKSpaceCentreColumn;
-			 ismrmrd_dataset->appendAcquisition(*ismrmrd_wav);//write to dataset 
+			 
+			 //-----------------------------------------------
+			 bool pmu_data = true;
+			 // look at the bitshift thing and find the magic number : read the different waveforms into different channels
+			 uint32_t pos1 = siemens_dat.tellg();
+			 uint32_t packet_size;
+			 char packet_id[52];
+			 siemens_dat.read(reinterpret_cast<char*>(&packet_size), 4);
+			 siemens_dat.read(reinterpret_cast<char*>(&packet_id), 52);
+			 std::string find_pmu = packet_id;
+			 if (find_pmu.find("PMU") == std::string::npos) {
+				 pmu_data = false;
+			 }
+			 uint32_t swapped_flag;
+			 siemens_dat.read(reinterpret_cast<char*>(&swapped_flag), 4);
+			 if (!pmu_data){
+				 uint32_t dummy_bytes = ceil((packet_size + 60) / 32) * 32  - 60;
+				 siemens_dat.seekg(dummy_bytes,std::ios_base::cur);
+				 continue;
+			 }
+			 uint64_t timestamp;
+			 uint32_t packetnr;
+			 siemens_dat.read(reinterpret_cast<char*>(&timestamp), 8);
+			 siemens_dat.read(reinterpret_cast<char*>(&packetnr), 4);
+			 uint32_t duration;
+			 siemens_dat.read(reinterpret_cast<char*>(&duration), 4);
+			 uint32_t magic = 0;
+			 uint32_t period;
+			 uint32_t num_samples;
+			 ISMRMRD::ISMRMRD_Waveform waveform_sample;
+			 while(magic != PMU_MAGIC_END){
+				 siemens_dat.read(reinterpret_cast<char*>(&magic), 4);
+				 if (magic != PMU_MAGIC_END) {
+					 siemens_dat.read(reinterpret_cast<char*>(&period), 4);
+				 }
+
+				 //make sure we do not perform a division by zero
+				 if (period != 0 && magic!= PMU_MAGIC_EXT1 && magic != PMU_MAGIC_EXT2) {
+					 num_samples = duration / period;
+
+					 uint32_t *buffy = new uint32_t[num_samples];//(uint32_t*)malloc(num_samples*sizeof(uint32_t) );
+
+					 //std::vector<uint32_t> empty;
+					 //waveform_sample.data[magic] = empty;
+
+					 siemens_dat.read(reinterpret_cast<char*>(&buffy[0]), num_samples * 4);
+					 for (int i = 0; i != num_samples; i++) {
+						 waveform_sample.data[magic].push_back(buffy[i]);
+					 }
+					 waveform_sample.extradata[magic].Duration = duration;
+					 waveform_sample.extradata[magic].Period = period;
+					 delete[] buffy;
+				 }
+			 }
+			 ismrmrd_wav->wav.push_back(waveform_sample);
+			 //this should be collected in an internal struture and only written to the dataset at the end , for the sync data to stay collected
+			 uint32_t pos2 = siemens_dat.tellg();
+
+			 uint32_t dummy_bytes = (uint32_t)(std::ceil((pos2 - pos1) / 32.0) * 32) - (pos2 - pos1);
+			
+			 siemens_dat.seekg(dummy_bytes, std::ios_base::cur);
 			 continue;
          }
 
@@ -1811,7 +1883,8 @@ int main(int argc, char *argv[] )
          delete ismrmrd_acq;
 
      }//End of the while loop
-
+	 ismrmrd_dataset->appendAcquisition(*ismrmrd_wav);//write to dataset 
+	 delete ismrmrd_wav;
      if (!siemens_dat)
      {
          std::cerr << "WARNING: Unexpected error.  Please check the result." << std::endl;
