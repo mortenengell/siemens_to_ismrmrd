@@ -1540,7 +1540,7 @@ int main(int argc, char *argv[] )
 			 
 			 //-----------------------------------------------
 			 bool pmu_data = true;
-			 // look at the bitshift thing and find the magic number : read the different waveforms into different channels
+			 // look at the bitshift and find the magic number : read the different waveforms into different channels
 			 uint32_t pos1 = siemens_dat.tellg();
 			 uint32_t packet_size;
 			 char packet_id[52];
@@ -1567,30 +1567,35 @@ int main(int argc, char *argv[] )
 			 uint32_t period;
 			 uint32_t num_samples;
 			 ISMRMRD::ISMRMRD_Waveform waveform_sample;
+			 uint32_t data_size = 0;
 			 while(magic != PMU_MAGIC_END){
 				 siemens_dat.read(reinterpret_cast<char*>(&magic), 4);
 				 if (magic != PMU_MAGIC_END) {
 					 siemens_dat.read(reinterpret_cast<char*>(&period), 4);
 				 }
 
-				 //make sure we do not perform a division by zero
+				 //make sure we do not perform a division by zero and check that these are not the ext channels
 				 if (period != 0 && magic!= PMU_MAGIC_EXT1 && magic != PMU_MAGIC_EXT2) {
 					 num_samples = duration / period;
-
-					 uint32_t *buffy = new uint32_t[num_samples];//(uint32_t*)malloc(num_samples*sizeof(uint32_t) );
-
-					 //std::vector<uint32_t> empty;
-					 //waveform_sample.data[magic] = empty;
+					 uint32_t *buffy = new uint32_t[num_samples];
 
 					 siemens_dat.read(reinterpret_cast<char*>(&buffy[0]), num_samples * 4);
 					 for (int i = 0; i != num_samples; i++) {
 						 waveform_sample.data[magic].push_back(buffy[i]);
 					 }
-					 waveform_sample.extradata[magic].Duration = duration;
-					 waveform_sample.extradata[magic].Period = period;
+					 data_size += num_samples * 4;
+					 waveform_sample.extra_data[magic].Duration = duration;
+					 waveform_sample.extra_data[magic].Period = period;
+					 waveform_sample.channel_info[magic] += num_samples * 4;
+					 // cleanup before next loop
 					 delete[] buffy;
 				 }
 			 }
+			 // remap from the map containers in the struct to something that is easy to write to hdf 5
+			 waveform_sample.head.data_size = map_size(waveform_sample.data);
+			 waveform_sample.head.channel_size = map_size(waveform_sample.channel_info);
+			 waveform_sample.head.extra_data_size = map_size(waveform_sample.extra_data);
+
 			 ismrmrd_wav->wav.push_back(waveform_sample);
 			 //this should be collected in an internal struture and only written to the dataset at the end , for the sync data to stay collected
 			 uint32_t pos2 = siemens_dat.tellg();
@@ -1883,7 +1888,7 @@ int main(int argc, char *argv[] )
          delete ismrmrd_acq;
 
      }//End of the while loop
-	 ismrmrd_dataset->appendAcquisition(*ismrmrd_wav);//write to dataset 
+	 ismrmrd_dataset->appendWaveform(*ismrmrd_wav);//write to dataset 
 	 delete ismrmrd_wav;
      if (!siemens_dat)
      {
